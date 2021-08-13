@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Röhrig-Zöllner"
+  given-names: "Melven"
+  orcid: "https://orcid.org/0000-0001-9851-5886"
+- family-names: "Holke"
+  given-names: "Johannes"
+  orcid: "https://orcid.org/0000-0002-2783-3286"
+title: "Googletest MPI - Extension of the Google Test library to support MPI parallel tests "
+date-released: 2021-08-13
+url: "https://github.com/DLR-SC/googletest_mpi/tree/feature/mpi_nonblocking_expect"
