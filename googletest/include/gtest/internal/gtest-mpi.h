@@ -1,4 +1,4 @@
-// Copyright 2006, Google Inc.
+// Copyright 2021, Johannes Holke.
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -26,45 +26,37 @@
 // THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//
+// Authors: johannes.holke@dlr.de (Johannes Holke)
+//
+// Low-level types and utilities for extending Google Test with MPI support.
+// This file should be included in each internal Google Test file that requires 
+// MPI. If MPI support is enabled the MPI headers will be included together
+// with this file.
+// Since some MPI vendors require MPI to be included first 
+// ALWAYS INCLUDE THISE HEADER FIRST before including other headers.
+//
+// Why are the contents of this file not part of gtest-port.h?
+//   Because the gtest-port.h is not required to be included first and
+//   we do not want to change this requirement.
 
+#ifndef GTEST_INCLUDE_GTEST_INTERNAL_GTEST_MPI_H_
+#define GTEST_INCLUDE_GTEST_INTERNAL_GTEST_MPI_H_
+
+//   GTEST_HAS_MPI            - Define it to 1/0 to indicate that <mpi.h>
+//                              is/isn't available.
+
+// Enable MPI
+// To enable MPI define GTEST_HAS_MPI to 1 before
+// including this header.
+#ifndef GTEST_HAS_MPI
+#define GTEST_HAS_MPI 0
+#endif
+
+// Include the MPI header
 #if GTEST_HAS_MPI
-// Some MPI vendors require mpi.h to be included before anything else.
 #include <mpi.h>
-#endif // GTEST_HAS_MPI
-
-#include <cstdio>
-
-#include "gtest/gtest.h"
-
-#ifdef ARDUINO
-void setup() {
-  testing::InitGoogleTest();
-}
-
-void loop() { RUN_ALL_TESTS(); }
-
-#else
-
-GTEST_API_ int main(int argc, char **argv) {
-#if GTEST_HAS_MPI
-  if( MPI_Init(&argc, &argv) != MPI_SUCCESS )
-  {
-    GTEST_LOG_(ERROR) << "Error calling MPI_Init!\n";
-
-    return 1;
-  }
 #endif
-  printf("Running main() from %s\n", __FILE__);
-  testing::InitGoogleTest(&argc, argv);
-  int result = RUN_ALL_TESTS();
-#if GTEST_HAS_MPI
-  if( MPI_Finalize() != MPI_SUCCESS )
-  {
-    GTEST_LOG_(ERROR) << "Error calling MPI_Finalize!\n";
-    return 1;
-  }
-#endif
-  // Warning: this return value may get lost when executed with MPI
-  return result;
-}
-#endif
+
+#endif // GTEST_INCLUDE_GTEST_INTERNAL_GTEST_MPI_H_
+

@@ -52,6 +52,10 @@
 #ifndef GTEST_INCLUDE_GTEST_GTEST_H_
 #define GTEST_INCLUDE_GTEST_GTEST_H_
 
+// Some MPI vendors require the mpi.h to be included before anything else,
+// hence we need to include the gtest-mpi header (that - if enabled - includes mpi.h) first.
+#include "gtest/internal/gtest-mpi.h"
+
 #include <cstddef>
 #include <limits>
 #include <memory>
@@ -278,6 +282,10 @@ class GTEST_API_ AssertionResult {
   // Used in EXPECT_TRUE/FALSE(assertion_result).
   AssertionResult(const AssertionResult& other);
 
+  // Copy constructor with possibility of synchronized result.
+  // Used in EXPECT_TRUE/FALSE_MPI(assertion_result).
+  AssertionResult(const AssertionResult& other, bool global);
+
 #if defined(_MSC_VER) && _MSC_VER < 1910
   GTEST_DISABLE_MSC_WARNINGS_PUSH_(4800 /* forcing value to bool */)
 #endif
@@ -286,17 +294,30 @@ class GTEST_API_ AssertionResult {
   //
   // T must be contextually convertible to bool.
   //
-  // The second parameter prevents this overload from being considered if
+  // The third parameter prevents this overload from being considered if
   // the argument is implicitly convertible to AssertionResult. In that case
   // we want AssertionResult's copy constructor to be used.
+  //
+  // The second argument (global) controls the behaviour if MPI parallelization is
+  // active. If global = true the the result of the assertion is synchronized among
+  // all MPI processes in GTEST_MPI_COMM_WORLD, thus the assertion is true if and only
+  // if it is true on all processes. If global = true then calling this constructor
+  // is an MPI collective operation.
+  // If global = false (default) then the result is not synchronized, there can be processes where
+  // the assertion is true and others where it is false.
   template <typename T>
   explicit AssertionResult(
-      const T& success,
+      const T& success, bool global = false,
       typename std::enable_if<
           !std::is_convertible<T, AssertionResult>::value>::type*
       /*enabler*/
       = nullptr)
-      : success_(success) {}
+      : success_(success), globalResultsDiffer_(false) {
+#if GTEST_HAS_MPI
+        if( global )
+          globalResultsDiffer_ = !boolIdenticalOnMPIprocs(success_);
+#endif
+      }
 
 #if defined(_MSC_VER) && _MSC_VER < 1910
   GTEST_DISABLE_MSC_WARNINGS_POP_()
@@ -309,7 +330,7 @@ class GTEST_API_ AssertionResult {
   }
 
   // Returns true if and only if the assertion succeeded.
-  operator bool() const { return success_; }  // NOLINT
+  operator bool() const { return success_ && !globalResultsDiffer_; } // NOLINT
 
   // Returns the assertion's negation. Used with EXPECT/ASSERT_FALSE.
   AssertionResult operator!() const;
@@ -338,7 +359,7 @@ class GTEST_API_ AssertionResult {
     return *this;
   }
 
- private:
+ protected:
   // Appends the contents of message to message_.
   void AppendMessage(const Message& a_message) {
     if (message_.get() == nullptr) message_.reset(new ::std::string);
@@ -348,8 +369,13 @@ class GTEST_API_ AssertionResult {
   // Swap the contents of this AssertionResult with other.
   void swap(AssertionResult& other);
 
+  // checks that all MPI processes have the same v
+  static bool boolIdenticalOnMPIprocs(bool v);
+
   // Stores result of the assertion predicate.
   bool success_;
+  // Used to mark different results on different processes as failure
+  bool globalResultsDiffer_;
   // Stores the message describing the condition in case the expectation
   // construct is not satisfied with the predicate's outcome.
   // Referenced via a pointer to avoid taking too much stack frame space
@@ -358,10 +384,10 @@ class GTEST_API_ AssertionResult {
 };
 
 // Makes a successful assertion result.
-GTEST_API_ AssertionResult AssertionSuccess();
+GTEST_API_ AssertionResult AssertionSuccess(bool global = false);
 
 // Makes a failed assertion result.
-GTEST_API_ AssertionResult AssertionFailure();
+GTEST_API_ AssertionResult AssertionFailure(bool global = false);
 
 // Makes a failed assertion result with the given failure message.
 // Deprecated; use AssertionFailure() << msg.
@@ -580,6 +606,14 @@ class GTEST_API_ TestResult {
   // Returns true if and only if the test was skipped.
   bool Skipped() const;
 
+#if GTEST_HAS_MPI
+  // Synchronize the result of Failed() across MPI processes
+  // The return value is true if the synchronization was successful and false otherwise.
+  // This is an MPI collective operation and must be called on all processes in
+  // GTEST_MPI_COMM_WORLD
+  bool Synchronize ();
+#endif
+
   // Returns true if and only if the test failed.
   bool Failed() const;
 
@@ -661,6 +695,10 @@ class GTEST_API_ TestResult {
 
   // Clears the object.
   void Clear();
+
+#if GTEST_HAS_MPI
+  bool SomeProcessFailed;
+#endif
 
   // Protects mutable state of the property vector and of owned
   // properties, whose values may be updated.
@@ -1503,12 +1541,14 @@ namespace internal {
 template <typename T1, typename T2>
 AssertionResult CmpHelperEQFailure(const char* lhs_expression,
                                    const char* rhs_expression,
-                                   const T1& lhs, const T2& rhs) {
+                                   const T1& lhs, const T2& rhs,
+                                   bool global = false) {
   return EqFailure(lhs_expression,
                    rhs_expression,
                    FormatForComparisonFailureMessage(lhs, rhs),
                    FormatForComparisonFailureMessage(rhs, lhs),
-                   false);
+                   false,
+                   global);
 }
 
 // This block of code defines operator==/!=
@@ -1523,12 +1563,13 @@ template <typename T1, typename T2>
 AssertionResult CmpHelperEQ(const char* lhs_expression,
                             const char* rhs_expression,
                             const T1& lhs,
-                            const T2& rhs) {
+                            const T2& rhs,
+                            bool global = false) {
   if (lhs == rhs) {
-    return AssertionSuccess();
+    return AssertionSuccess(global);
   }
 
-  return CmpHelperEQFailure(lhs_expression, rhs_expression, lhs, rhs);
+  return CmpHelperEQFailure(lhs_expression, rhs_expression, lhs, rhs, global);
 }
 
 // With this overloaded version, we allow anonymous enums to be used
@@ -1549,9 +1590,11 @@ class EqHelper {
       typename std::enable_if<!std::is_integral<T1>::value ||
                               !std::is_pointer<T2>::value>::type* = nullptr>
   static AssertionResult Compare(const char* lhs_expression,
-                                 const char* rhs_expression, const T1& lhs,
-                                 const T2& rhs) {
-    return CmpHelperEQ(lhs_expression, rhs_expression, lhs, rhs);
+                                 const char* rhs_expression,
+                                 const T1& lhs,
+                                 const T2& rhs,
+                                 bool global = false) {
+    return CmpHelperEQ(lhs_expression, rhs_expression, lhs, rhs, global);
   }
 
   // With this overloaded version, we allow anonymous enums to be used
@@ -1563,18 +1606,20 @@ class EqHelper {
   static AssertionResult Compare(const char* lhs_expression,
                                  const char* rhs_expression,
                                  BiggestInt lhs,
-                                 BiggestInt rhs) {
-    return CmpHelperEQ(lhs_expression, rhs_expression, lhs, rhs);
+                                 BiggestInt rhs,
+                                 bool global = false) {
+    return CmpHelperEQ(lhs_expression, rhs_expression, lhs, rhs, global);
   }
 
   template <typename T>
   static AssertionResult Compare(
       const char* lhs_expression, const char* rhs_expression,
       // Handle cases where '0' is used as a null pointer literal.
-      std::nullptr_t /* lhs */, T* rhs) {
+      std::nullptr_t /* lhs */, T* rhs,
+      bool global = false) {
     // We already know that 'lhs' is a null pointer.
     return CmpHelperEQ(lhs_expression, rhs_expression, static_cast<T*>(nullptr),
-                       rhs);
+                       rhs, global);
   }
 };
 
@@ -1584,8 +1629,8 @@ class EqHelper {
 template <typename T1, typename T2>
 AssertionResult CmpHelperOpFailure(const char* expr1, const char* expr2,
                                    const T1& val1, const T2& val2,
-                                   const char* op) {
-  return AssertionFailure()
+                                   const char* op, bool global = false) {
+  return AssertionFailure(global)
          << "Expected: (" << expr1 << ") " << op << " (" << expr2
          << "), actual: " << FormatForComparisonFailureMessage(val1, val2)
          << " vs " << FormatForComparisonFailureMessage(val2, val1);
@@ -1605,15 +1650,15 @@ AssertionResult CmpHelperOpFailure(const char* expr1, const char* expr2,
 #define GTEST_IMPL_CMP_HELPER_(op_name, op)\
 template <typename T1, typename T2>\
 AssertionResult CmpHelper##op_name(const char* expr1, const char* expr2, \
-                                   const T1& val1, const T2& val2) {\
+                                   const T1& val1, const T2& val2, bool global = false) {\
   if (val1 op val2) {\
-    return AssertionSuccess();\
+    return AssertionSuccess(global);\
   } else {\
-    return CmpHelperOpFailure(expr1, expr2, val1, val2, #op);\
+    return CmpHelperOpFailure(expr1, expr2, val1, val2, #op, global);\
   }\
 }\
 GTEST_API_ AssertionResult CmpHelper##op_name(\
-    const char* expr1, const char* expr2, BiggestInt val1, BiggestInt val2)
+    const char* expr1, const char* expr2, BiggestInt val1, BiggestInt val2, bool global = false)
 
 // INTERNAL IMPLEMENTATION - DO NOT USE IN A USER PROGRAM.
 
@@ -1636,7 +1681,8 @@ GTEST_IMPL_CMP_HELPER_(GT, >);
 GTEST_API_ AssertionResult CmpHelperSTREQ(const char* s1_expression,
                                           const char* s2_expression,
                                           const char* s1,
-                                          const char* s2);
+                                          const char* s2,
+                                          bool global = false);
 
 // The helper function for {ASSERT|EXPECT}_STRCASEEQ.
 //
@@ -1644,7 +1690,8 @@ GTEST_API_ AssertionResult CmpHelperSTREQ(const char* s1_expression,
 GTEST_API_ AssertionResult CmpHelperSTRCASEEQ(const char* s1_expression,
                                               const char* s2_expression,
                                               const char* s1,
-                                              const char* s2);
+                                              const char* s2,
+                                              bool global = false);
 
 // The helper function for {ASSERT|EXPECT}_STRNE.
 //
@@ -1652,7 +1699,8 @@ GTEST_API_ AssertionResult CmpHelperSTRCASEEQ(const char* s1_expression,
 GTEST_API_ AssertionResult CmpHelperSTRNE(const char* s1_expression,
                                           const char* s2_expression,
                                           const char* s1,
-                                          const char* s2);
+                                          const char* s2,
+                                          bool global = false);
 
 // The helper function for {ASSERT|EXPECT}_STRCASENE.
 //
@@ -1660,7 +1708,8 @@ GTEST_API_ AssertionResult CmpHelperSTRNE(const char* s1_expression,
 GTEST_API_ AssertionResult CmpHelperSTRCASENE(const char* s1_expression,
                                               const char* s2_expression,
                                               const char* s1,
-                                              const char* s2);
+                                              const char* s2,
+                                              bool global = false);
 
 
 // Helper function for *_STREQ on wide strings.
@@ -1669,7 +1718,8 @@ GTEST_API_ AssertionResult CmpHelperSTRCASENE(const char* s1_expression,
 GTEST_API_ AssertionResult CmpHelperSTREQ(const char* s1_expression,
                                           const char* s2_expression,
                                           const wchar_t* s1,
-                                          const wchar_t* s2);
+                                          const wchar_t* s2,
+                                          bool global = false);
 
 // Helper function for *_STRNE on wide strings.
 //
@@ -1677,7 +1727,8 @@ GTEST_API_ AssertionResult CmpHelperSTREQ(const char* s1_expression,
 GTEST_API_ AssertionResult CmpHelperSTRNE(const char* s1_expression,
                                           const char* s2_expression,
                                           const wchar_t* s1,
-                                          const wchar_t* s2);
+                                          const wchar_t* s2,
+                                          bool global = false);
 
 }  // namespace internal
 
@@ -1691,30 +1742,38 @@ GTEST_API_ AssertionResult CmpHelperSTRNE(const char* s1_expression,
 // expressions that generated the two real arguments.
 GTEST_API_ AssertionResult IsSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const char* needle, const char* haystack);
+    const char* needle, const char* haystack,
+    bool global = false);
 GTEST_API_ AssertionResult IsSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const wchar_t* needle, const wchar_t* haystack);
+    const wchar_t* needle, const wchar_t* haystack,
+    bool global = false);
 GTEST_API_ AssertionResult IsNotSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const char* needle, const char* haystack);
+    const char* needle, const char* haystack,
+    bool global = false);
 GTEST_API_ AssertionResult IsNotSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const wchar_t* needle, const wchar_t* haystack);
+    const wchar_t* needle, const wchar_t* haystack,
+    bool global = false);
 GTEST_API_ AssertionResult IsSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const ::std::string& needle, const ::std::string& haystack);
+    const ::std::string& needle, const ::std::string& haystack,
+    bool global = false);
 GTEST_API_ AssertionResult IsNotSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const ::std::string& needle, const ::std::string& haystack);
+    const ::std::string& needle, const ::std::string& haystack,
+    bool global = false);
 
 #if GTEST_HAS_STD_WSTRING
 GTEST_API_ AssertionResult IsSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const ::std::wstring& needle, const ::std::wstring& haystack);
+    const ::std::wstring& needle, const ::std::wstring& haystack,
+    bool global = false);
 GTEST_API_ AssertionResult IsNotSubstring(
     const char* needle_expr, const char* haystack_expr,
-    const ::std::wstring& needle, const ::std::wstring& haystack);
+    const ::std::wstring& needle, const ::std::wstring& haystack,
+    bool global = false);
 #endif  // GTEST_HAS_STD_WSTRING
 
 namespace internal {
@@ -1978,6 +2037,25 @@ class TestWithParam : public Test, public WithParamInterface<T> {
   GTEST_TEST_BOOLEAN_(!(condition), #condition, true, false, \
                       GTEST_FATAL_FAILURE_)
 
+#if GTEST_HAS_MPI
+// Boolean assertions. MPI blocking versions
+// Condition can be either a Boolean expression or an
+// AssertionResult. For more information on how to use AssertionResult with
+// these macros see comments on that class.
+#define EXPECT_TRUE_MPI(condition) \
+  GTEST_TEST_BOOLEAN_MPI_((condition), #condition, false, true, \
+                      GTEST_NONFATAL_FAILURE_)
+#define EXPECT_FALSE_MPI(condition) \
+  GTEST_TEST_BOOLEAN_MPI_(!(condition), #condition, true, false, \
+                      GTEST_NONFATAL_FAILURE_)
+#define ASSERT_TRUE_MPI(condition) \
+  GTEST_TEST_BOOLEAN_MPI_((condition), #condition, false, true, \
+                      GTEST_FATAL_FAILURE_)
+#define ASSERT_FALSE_MPI(condition) \
+  GTEST_TEST_BOOLEAN_MPI_(!(condition), #condition, true, false, \
+                      GTEST_FATAL_FAILURE_)
+#endif
+
 // Macros for testing equalities and inequalities.
 //
 //    * {ASSERT|EXPECT}_EQ(v1, v2): Tests that v1 == v2
@@ -2024,6 +2102,20 @@ class TestWithParam : public Test, public WithParamInterface<T> {
 //   ASSERT_LT(i, array_size);
 //   ASSERT_GT(records.size(), 0) << "There is no record left.";
 
+// Notes on MPI
+// If GTEST_HAS_MPI is true, then the EXPECT_*_MPI and ASSERT_*_MPI macros are
+// collective operations..
+// EXPECT_*_MPI and ASSERT_*_MPI evaluate to the same value on each MPI process,
+// meaning if they evaluate to false on any process, they will evaluate to
+// false on all processes. In the case of ASSERT, the test will abort on all processes.
+//
+// If you need to perform different checks on different MPI processes
+// use the normal EXPECT_/ASSERT_ versions of the macros.
+// It is still ensured that the overall
+// testresult will be the same on each process since after a test is finished,
+// the results are synchronized. However, the single operations are not blocking
+// and can produce different results on different processes.
+
 #define EXPECT_EQ(val1, val2) \
   EXPECT_PRED_FORMAT2(::testing::internal::EqHelper::Compare, val1, val2)
 #define EXPECT_NE(val1, val2) \
@@ -2037,6 +2129,24 @@ class TestWithParam : public Test, public WithParamInterface<T> {
 #define EXPECT_GT(val1, val2) \
   EXPECT_PRED_FORMAT2(::testing::internal::CmpHelperGT, val1, val2)
 
+#if GTEST_HAS_MPI
+#define EXPECT_EQ_MPI(val1, val2) \
+  EXPECT_PRED_FORMAT2_MPI(::testing::internal:: \
+                      EqHelper::Compare, \
+                      val1, val2)
+#define EXPECT_NE_MPI(val1, val2) \
+  EXPECT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperNE, val1, val2)
+#define EXPECT_LE_MPI(val1, val2) \
+  EXPECT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperLE, val1, val2)
+#define EXPECT_LT_MPI(val1, val2) \
+  EXPECT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperLT, val1, val2)
+#define EXPECT_GE_MPI(val1, val2) \
+  EXPECT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperGE, val1, val2)
+#define EXPECT_GT_MPI(val1, val2) \
+  EXPECT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperGT, val1, val2)
+#endif
+
+
 #define GTEST_ASSERT_EQ(val1, val2) \
   ASSERT_PRED_FORMAT2(::testing::internal::EqHelper::Compare, val1, val2)
 #define GTEST_ASSERT_NE(val1, val2) \
@@ -2049,6 +2159,23 @@ class TestWithParam : public Test, public WithParamInterface<T> {
   ASSERT_PRED_FORMAT2(::testing::internal::CmpHelperGE, val1, val2)
 #define GTEST_ASSERT_GT(val1, val2) \
   ASSERT_PRED_FORMAT2(::testing::internal::CmpHelperGT, val1, val2)
+
+#if GTEST_HAS_MPI
+#define GTEST_ASSERT_EQ_MPI(val1, val2) \
+  ASSERT_PRED_FORMAT2_MPI(::testing::internal:: \
+                      EqHelper::Compare, \
+                      val1, val2)
+#define GTEST_ASSERT_NE_MPI(val1, val2) \
+  ASSERT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperNE, val1, val2)
+#define GTEST_ASSERT_LE_MPI(val1, val2) \
+  ASSERT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperLE, val1, val2)
+#define GTEST_ASSERT_LT_MPI(val1, val2) \
+  ASSERT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperLT, val1, val2)
+#define GTEST_ASSERT_GE_MPI(val1, val2) \
+  ASSERT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperGE, val1, val2)
+#define GTEST_ASSERT_GT_MPI(val1, val2) \
+  ASSERT_PRED_FORMAT2_MPI(::testing::internal::CmpHelperGT, val1, val2)
+#endif
 
 // Define macro GTEST_DONT_DEFINE_ASSERT_XY to 1 to omit the definition of
 // ASSERT_XY(), which clashes with some users' own code.
@@ -2075,6 +2202,32 @@ class TestWithParam : public Test, public WithParamInterface<T> {
 
 #if !GTEST_DONT_DEFINE_ASSERT_GT
 # define ASSERT_GT(val1, val2) GTEST_ASSERT_GT(val1, val2)
+#endif
+
+#if GTEST_HAS_MPI
+#if !GTEST_DONT_DEFINE_ASSERT_EQ
+# define ASSERT_EQ_MPI(val1, val2) GTEST_ASSERT_EQ_MPI(val1, val2)
+#endif
+
+#if !GTEST_DONT_DEFINE_ASSERT_NE
+# define ASSERT_NE_MPI(val1, val2) GTEST_ASSERT_NE_MPI(val1, val2)
+#endif
+
+#if !GTEST_DONT_DEFINE_ASSERT_LE
+# define ASSERT_LE_MPI(val1, val2) GTEST_ASSERT_LE_MPI(val1, val2)
+#endif
+
+#if !GTEST_DONT_DEFINE_ASSERT_LT
+# define ASSERT_LT_MPI(val1, val2) GTEST_ASSERT_LT_MPI(val1, val2)
+#endif
+
+#if !GTEST_DONT_DEFINE_ASSERT_GE
+# define ASSERT_GE_MPI(val1, val2) GTEST_ASSERT_GE_MPI(val1, val2)
+#endif
+
+#if !GTEST_DONT_DEFINE_ASSERT_GT
+# define ASSERT_GT_MPI(val1, val2) GTEST_ASSERT_GT_MPI(val1, val2)
+#endif
 #endif
 
 // C-string Comparisons.  All tests treat NULL and any non-NULL string

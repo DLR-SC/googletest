@@ -200,9 +200,23 @@ EXPECTED_SHARDED_TEST_XML = """<?xml version="1.0" encoding="UTF-8"?>
   </testsuite>
 </testsuites>"""
 
+EXPECTED_FILTERED_TEST_XML_MPI = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="1" failures="0" disabled="0" errors="0" time="*"
+            timestamp="*" name="AllTests" ad_hoc_property="42">
+  <testsuite name="SuccessfulTest_np1" tests="1" failures="0" disabled="0"
+             errors="0" time="*" timestamp="*">
+    <testcase name="Succeeds" status="run" result="completed" time="*" timestamp="*" classname="SuccessfulTest_np1"/>
+  </testsuite>
+</testsuites>"""
+
 EXPECTED_EMPTY_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuites tests="0" failures="0" disabled="0" errors="0" time="*"
-            timestamp="*" name="AllTests">
+            timestamp="*" name="gtest_no_test_unittest">
+</testsuites>"""
+
+EXPECTED_EMPTY_XML_MPI = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="0" failures="0" disabled="0" errors="0" time="*"
+            timestamp="*" name="gtest_no_test_unittest_np1">
 </testsuites>"""
 
 GTEST_PROGRAM_PATH = gtest_test_utils.GetTestExecutablePath(GTEST_PROGRAM_NAME)
@@ -224,7 +238,7 @@ class GTestXMLOutputUnitTest(gtest_xml_test_utils.GTestXMLTestCase):
       Runs a test program that generates a non-empty XML output, and
       tests that the XML output is expected.
       """
-      self._TestXmlOutput(GTEST_PROGRAM_NAME, EXPECTED_NON_EMPTY_XML, 1)
+      self._TestXmlOutput(GTEST_PROGRAM_NAME, EXPECTED_NON_EMPTY_XML, EXPECTED_NON_EMPTY_XML_MPI, 1)
 
   def testEmptyXmlOutput(self):
     """Verifies XML output for a Google Test binary without actual tests.
@@ -233,7 +247,7 @@ class GTestXMLOutputUnitTest(gtest_xml_test_utils.GTestXMLTestCase):
     tests that the XML output is expected.
     """
 
-    self._TestXmlOutput('gtest_no_test_unittest', EXPECTED_EMPTY_XML, 0)
+    self._TestXmlOutput('gtest_no_test_unittest', EXPECTED_EMPTY_XML, EXPECTED_EMPTY_XML_MPI, 0)
 
   def testTimestampValue(self):
     """Checks whether the timestamp attribute in the XML output is valid.
@@ -319,7 +333,7 @@ class GTestXMLOutputUnitTest(gtest_xml_test_utils.GTestXMLTestCase):
     non-selected tests do not show up in the XML output.
     """
 
-    self._TestXmlOutput(GTEST_PROGRAM_NAME, EXPECTED_FILTERED_TEST_XML, 0,
+    self._TestXmlOutput(GTEST_PROGRAM_NAME, EXPECTED_FILTERED_TEST_XML, EXPECTED_FILTERED_TEST_XML_MPI, 0,
                         extra_args=['%s=SuccessfulTest.*' % GTEST_FILTER_FLAG])
 
   def testShardedTestXmlOutput(self):
@@ -377,9 +391,15 @@ class GTestXMLOutputUnitTest(gtest_xml_test_utils.GTestXMLTestCase):
     actual = self._GetXmlOutput(gtest_prog_name, extra_args or [],
                                 extra_env or {}, expected_exit_code)
     expected = minidom.parseString(expected_xml)
+    expected_alt = minidom.parseString(expected_xml_alt)
     self.NormalizeXml(actual.documentElement)
-    self.AssertEquivalentNodes(expected.documentElement,
-                               actual.documentElement)
+    try:
+        self.AssertEquivalentNodes(expected.documentElement,
+                                   actual.documentElement)
+    except AssertionError:
+        self.AssertEquivalentNodes(expected_alt.documentElement,
+                                   actual.documentElement)
+
     expected.unlink()
     actual.unlink()
 

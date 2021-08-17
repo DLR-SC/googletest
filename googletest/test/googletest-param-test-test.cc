@@ -1038,6 +1038,9 @@ INSTANTIATE_TEST_SUITE_P(MyEnumTests, MyEnumTest,
                          ::testing::Values(ENUM1, ENUM2, 0));
 
 int main(int argc, char **argv) {
+#if GTEST_HAS_MPI
+  MPI_Init(&argc, &argv);
+#endif
   // Used in TestGenerationTest test suite.
   AddGlobalTestEnvironment(TestGenerationTest::Environment::Instance());
   // Used in GeneratorEvaluationTest test suite. Tests that the updated value
@@ -1051,5 +1054,10 @@ int main(int argc, char **argv) {
   // GeneratorEvaluationTest.
   GeneratorEvaluationTest::set_param_value(2);
 
-  return RUN_ALL_TESTS();
+  int result = RUN_ALL_TESTS();
+
+#if GTEST_HAS_MPI
+  MPI_Finalize();
+#endif
+  return result;
 }
